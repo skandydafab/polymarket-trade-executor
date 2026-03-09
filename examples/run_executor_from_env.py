@@ -47,12 +47,19 @@ class PrintLogger:
         print("ERROR", message, fields)
 
 
+@dataclass(frozen=True, slots=True)
+class SubscriptionScope:
+    market_ids: tuple[str, ...]
+    token_ids: tuple[str, ...]
+
+
 def main() -> None:
     project_root = PROJECT_ROOT
     _load_dotenv_file(project_root / ".env")
 
     live_enabled = _env_bool("EXECUTOR_LIVE_TRADING_ENABLED", False)
     run_recovery_on_start = _env_bool("EXECUTOR_RUN_RECOVERY_ON_START", False)
+    subscription_scope = _read_subscription_scope_from_env()
 
     logger = PrintLogger()
     planner = ExecutionPlanner(PlannerConfig())
@@ -81,6 +88,16 @@ def main() -> None:
     try:
         service.start()
         print("mode", "live" if live_enabled else "paper")
+        if subscription_scope.market_ids or subscription_scope.token_ids:
+            print(
+                "subscription_scope",
+                {
+                    "market_ids": subscription_scope.market_ids,
+                    "token_ids": subscription_scope.token_ids,
+                },
+            )
+        else:
+            print("subscription_scope", "not configured")
         print("snapshot", service.snapshot())
 
         if run_recovery_on_start:
@@ -171,6 +188,13 @@ def _build_optional_signer(adapter_config: PolymarketAdapterConfig):
     return PyClobClientOrderSigner(signer_config)
 
 
+def _read_subscription_scope_from_env() -> SubscriptionScope:
+    return SubscriptionScope(
+        market_ids=_env_csv("POLYMARKET_SUBSCRIBE_MARKET_IDS"),
+        token_ids=_env_csv("POLYMARKET_SUBSCRIBE_TOKEN_IDS"),
+    )
+
+
 def _resolve_journal_dir(project_root: Path) -> Path:
     configured = os.environ.get("EXECUTOR_JOURNAL_DIR", "./data/journal")
     raw_path = Path(configured)
@@ -229,6 +253,13 @@ def _env_optional_int(name: str) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    value = _env_optional(name)
+    if value is None:
+        return tuple()
+    return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
 if __name__ == "__main__":

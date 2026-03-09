@@ -1,84 +1,219 @@
 # PolyymarketExecutor
 
-Deterministic multi-leg execution core for Polymarket-style venue execution, including planning, risk controls, state machine transitions, venue abstraction, and journal/recovery.
+Deterministic multi-leg execution engine for Polymarket-style CLOB trading, with explicit risk controls, auditable state transitions, and restart recovery support.
 
-## Status
+---
 
-- Ready for supervised, small-size live testing.
-- `token_id` is propagated end-to-end through planning, execution, and journaling.
-- Shared parseable client order IDs are used via `ClientOrderIdFactory`.
-- Concrete HTTP CLOB client and optional SDK-backed signer are included.
-- Current test baseline: `62 passed`.
+## 1) Purpose of this README
 
-## Quick start
+This document is intentionally written as a **handoff brief for another agent/reviewer**.
 
-1. Create and activate a venv (if needed).
-2. Copy env template:
+It covers:
+- what the system currently does,
+- what was recently added and hardened,
+- where to inspect the code,
+- and what risks/edge-cases should be reviewed before scaling live usage.
+
+---
+
+## 2) Current project snapshot
+
+- Runtime target: Python 3.12
+- Core pattern: deterministic planner + risk gate + single-writer executor + venue adapter + journal/replay
+- Live integration path: `PolymarketVenueAdapter` + concrete HTTP CLOB client
+- Optional signing path: SDK-backed signer (`py-clob-client`) or custom signer callback
+- Current local test baseline: **62 passed**
+
+Recent critical correctness work includes:
+- `token_id` propagated from opportunity → planned leg → venue intent → journal/replay
+- shared parseable client order ID generation via `ClientOrderIdFactory`
+- concrete CLOB HTTP client implementation with robust payload normalization
+- SDK signer helper with fallback-compatible invocation behavior
+- executable env-driven wiring entrypoint for reproducible startup
+
+---
+
+## 3) System architecture and flow
+
+High-level execution flow:
+
+1. **Opportunity enters** with leg metadata and confidence window.
+2. **Planner** validates books/snapshots and emits an `ExecutionPlan` or deterministic rejection.
+3. **Risk manager** performs pre-trade checks and can hard block or auto-halt.
+4. **Executor service** turns plan legs into venue intents, tracks package/leg lifecycle, and processes updates.
+5. **Venue adapter/client** submit/cancel/poll normalize venue-specific payloads into internal events.
+6. **State machine** applies strict transitions for each leg and package.
+7. **Journal** records canonical events for replay and restart recovery.
+8. **Recovery** reconstructs state, reconciles open orders, and can enforce protective halt.
+
+---
+
+## 4) Files to review first (agent checklist)
+
+### Core behavior
+- `executor/executor_service.py`
+- `executor/state_machine.py`
+- `executor/risk.py`
+- `executor/planner.py`
+
+### Venue integration
+- `executor/polymarket_adapter.py`
+- `executor/polymarket_clob_client.py`
+- `executor/polymarket_sdk_signer.py`
+- `executor/venue.py`
+
+### Reliability and recovery
+- `executor/journal.py`
+- `tests/replay/test_deterministic_replay.py`
+- `tests/test_journal_recovery.py`
+
+### Wiring and operations
+- `examples/run_executor_from_env.py`
+- `.env.example`
+
+---
+
+## 5) What to look out for (review risks)
+
+### A. Ambiguous venue outcomes
+Network timeout/transport errors on submit/cancel are treated as ambiguous until updates/reconciliation confirm final state.
+
+Review that:
+- ambiguous status paths never silently downgrade to success,
+- retries do not violate idempotency,
+- reconciliation actions remain operator-visible.
+
+### B. Late fills after cancel/timeout
+Late fills are explicitly modeled and should trigger unwind-required behavior when exposure appears after terminal-looking states.
+
+Review that:
+- late-fill transitions are monotonic and deterministic,
+- fill accounting never regresses cumulative quantities,
+- risk escalation occurs on asymmetric exposure.
+
+### C. Recovery + halt interaction
+Recovery can reconstruct active packages and detect unknown/missing open orders.
+
+Review that:
+- replay + reconciliation produce expected active/open sets,
+- halt-after-recovery behavior matches desired operational policy,
+- relation/package mapping remains stable across restart.
+
+### D. SDK signer compatibility drift
+`py-clob-client` signatures can vary by version.
+
+Review that:
+- signer method dispatch remains compatible with your deployed SDK version,
+- private key is required only where expected,
+- signed payload shape matches what your venue endpoint accepts.
+
+### E. Env safety
+Live mode is env-toggled and should not be enabled accidentally.
+
+Review that:
+- default mode remains paper-safe,
+- `.env` is ignored in VCS,
+- no secrets are logged.
+
+---
+
+## 6) Running the project
+
+### A. Setup
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-3. Fill required secrets in `.env`:
-   - `POLYMARKET_API_URL`
-   - `POLYMARKET_PRIVATE_KEY` (required for live signing)
-   - optional API auth fields (`POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_PASSPHRASE`)
+Fill `.env` with your real values before live mode.
 
-## Recommended executable entrypoint (from env)
-
-Run:
+### B. Recommended env-based executable
 
 ```powershell
 .\.venv\Scripts\python.exe .\examples\run_executor_from_env.py
 ```
 
-Behavior:
-- Loads `.env` automatically.
-- Builds planner, risk manager, venue adapter/client, journal, recovery coordinator, and `ExecutorService`.
-- Starts and stops the service safely for wiring validation.
+This entrypoint:
+- loads `.env`,
+- constructs planner/risk/adapter/journal/recovery/service,
+- parses optional market subscription scope from env,
+- starts service and performs a safe startup check,
+- optionally runs recovery on startup.
 
-Modes:
-- Paper mode (default): `EXECUTOR_LIVE_TRADING_ENABLED=false` (uses `FakeVenueAdapter`).
-- Live mode: `EXECUTOR_LIVE_TRADING_ENABLED=true` (uses `PolymarketVenueAdapter` + HTTP CLOB client).
-- Optional startup recovery: `EXECUTOR_RUN_RECOVERY_ON_START=true`.
+### C. Market subscription scope
 
-## SDK signer (optional but recommended for live)
+Put your target markets/tokens in `.env`:
 
-Install dependency:
+- `POLYMARKET_SUBSCRIBE_MARKET_IDS`
+- `POLYMARKET_SUBSCRIBE_TOKEN_IDS`
+
+Format: comma-separated values.
+
+Example:
+
+```dotenv
+POLYMARKET_SUBSCRIBE_MARKET_IDS=0xmarket_condition_id_example_a,0xmarket_condition_id_example_b
+POLYMARKET_SUBSCRIBE_TOKEN_IDS=1234567890123456789012345678901234567890,9876543210987654321098765432109876543210
+```
+
+Note: the executor itself does not directly subscribe to data feeds. These env values are meant to define scope for your upstream market-data collector/detector, and `examples/run_executor_from_env.py` now parses and surfaces them on startup.
+
+### D. Modes
+
+- Paper mode (default):
+   - `EXECUTOR_LIVE_TRADING_ENABLED=false`
+   - uses `FakeVenueAdapter`
+
+- Live mode:
+   - `EXECUTOR_LIVE_TRADING_ENABLED=true`
+   - uses `PolymarketVenueAdapter` + `PolymarketCLOBHttpClient`
+
+- Optional startup recovery:
+   - `EXECUTOR_RUN_RECOVERY_ON_START=true`
+
+### E. Optional SDK signer dependency
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install py-clob-client
 ```
 
-Relevant env keys:
-- `POLYMARKET_USE_SDK_SIGNER=true`
-- `POLYMARKET_CHAIN_ID=137`
-- optional: `POLYMARKET_SIGNATURE_TYPE`, `POLYMARKET_FUNDER`, `POLYMARKET_MAKER`
+---
 
-If SDK signer is disabled or unavailable, the HTTP client still supports a custom signer callback.
+## 7) Test and validation commands
 
-## Other commands
-
-Run tests:
+Run full suite:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Run deterministic minimal pipeline demo:
+Run deterministic minimal demo:
 
 ```powershell
 .\.venv\Scripts\python.exe .\examples\minimal_executor_wiring.py
 ```
 
-## Live rollout checklist
+---
 
-1. Start in paper mode and verify logs/journal behavior.
-2. Move to tiny-size live orders with strict risk limits.
-3. Run one-package tests first and validate both-leg behavior.
-4. Confirm no ambiguous spikes and no unexpected late-fill handling issues.
-5. Test restart + recovery path before scaling.
+## 8) Suggested reviewer workflow (for another agent)
 
-## Caution
+1. Run tests and confirm baseline.
+2. Read `state_machine.py` transition logic with focus on failure/late-fill paths.
+3. Inspect `polymarket_adapter.py` ambiguous outcomes and dedupe/out-of-order handling.
+4. Inspect `journal.py` replay/recovery code and compatibility assumptions.
+5. Validate `run_executor_from_env.py` toggles and defaults (paper vs live safety).
+6. Confirm `.env.example` mapping matches all consumed env keys.
 
-Live trading can lose real funds. Keep limits conservative, monitor continuously, and scale only after repeated clean runs.
+---
+
+## 9) Known limitations / next checks
+
+- Startup entrypoint currently validates wiring and lifecycle startup, but is intentionally conservative.
+- Real-market rollout still requires strict monitoring and controlled position sizing.
+- If SDK version changes, signer compatibility should be re-verified with a targeted smoke test.
+
+---
+
+## 10) Operational caution
+
+Live trading can lose real funds. Keep limits conservative, use continuous monitoring, and only scale after repeated clean recovery and execution runs.
