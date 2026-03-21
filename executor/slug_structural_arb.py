@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -110,6 +111,7 @@ class SlugResolutionConfig:
     gamma_api_url: str = "https://gamma-api.polymarket.com"
     timeout_ms: int = 5000
     include_only_active_tradable: bool = True
+    max_concurrency: int = 8
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,18 +166,46 @@ def fetch_active_markets_for_slugs(
     config: SlugResolutionConfig,
 ) -> dict[str, tuple[SlugMarket, ...]]:
     by_slug: dict[str, tuple[SlugMarket, ...]] = {}
+    cleaned: list[str] = []
     seen: set[str] = set()
-
     for raw_slug in slugs:
         slug = raw_slug.strip()
         if not slug or slug in seen:
             continue
         seen.add(slug)
-        try:
-            by_slug[slug] = fetch_markets_for_slug(slug, config)
-        except Exception:
-            # Skip stale or invalid slugs so one failure does not abort the full batch.
-            continue
+        cleaned.append(slug)
+
+    if not cleaned:
+        return by_slug
+
+    worker_count = max(1, min(config.max_concurrency, len(cleaned)))
+    if worker_count == 1:
+        for slug in cleaned:
+            try:
+                by_slug[slug] = fetch_markets_for_slug(slug, config)
+            except Exception:
+                # Skip stale or invalid slugs so one failure does not abort the full batch.
+                continue
+        return by_slug
+
+    resolved: dict[str, tuple[SlugMarket, ...]] = {}
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="slug-fetch") as pool:
+        future_to_slug = {
+            pool.submit(fetch_markets_for_slug, slug, config): slug
+            for slug in cleaned
+        }
+        for future in as_completed(future_to_slug):
+            slug = future_to_slug[future]
+            try:
+                resolved[slug] = future.result()
+            except Exception:
+                # Skip stale or invalid slugs so one failure does not abort the full batch.
+                continue
+
+    for slug in cleaned:
+        markets = resolved.get(slug)
+        if markets is not None:
+            by_slug[slug] = markets
 
     return by_slug
 

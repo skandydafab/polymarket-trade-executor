@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -503,6 +504,7 @@ def _process_slug_based_structural_arb(
         gamma_api_url=os.environ.get("POLYMARKET_GAMMA_API_URL", "https://gamma-api.polymarket.com"),
         timeout_ms=_env_int("POLYMARKET_GAMMA_TIMEOUT_MS", 5000),
         include_only_active_tradable=_env_bool("POLYMARKET_SUBSCRIBE_ONLY_ACTIVE_TRADABLE", True),
+        max_concurrency=max(1, _env_int("POLYMARKET_GAMMA_MAX_CONCURRENCY", 8)),
     )
 
     slug_pairs = build_slug_pairs(slug_plan)
@@ -518,6 +520,7 @@ def _process_slug_based_structural_arb(
 
     use_public_orderbook = _env_bool("POLYMARKET_STRUCT_ARB_USE_PUBLIC_ORDERBOOK", True)
     public_book_timeout_ms = _env_int("POLYMARKET_PUBLIC_BOOK_TIMEOUT_MS", 1200)
+    public_book_max_concurrency = max(1, _env_int("POLYMARKET_PUBLIC_BOOK_MAX_CONCURRENCY", 8))
     public_book_api_url = os.environ.get("POLYMARKET_API_URL", "https://clob.polymarket.com")
 
     execution_mode = (os.environ.get("POLYMARKET_STRUCT_ARB_EXECUTION_MODE", "emit") or "emit").strip().lower()
@@ -559,6 +562,7 @@ def _process_slug_based_structural_arb(
             "min_edge_bps": min_edge_bps,
             "execution_mode": execution_mode,
             "use_public_orderbook": use_public_orderbook,
+            "public_book_max_concurrency": public_book_max_concurrency,
             "log_jsonl": str(jsonl_log_path),
             "log_csv": str(csv_log_path),
             "log_rejections": rejection_log_enabled,
@@ -607,6 +611,7 @@ def _process_slug_based_structural_arb(
                 use_public_orderbook=use_public_orderbook,
                 public_book_api_url=public_book_api_url,
                 public_book_timeout_ms=public_book_timeout_ms,
+                public_book_max_concurrency=public_book_max_concurrency,
             )
 
             if rejection_logger is not None:
@@ -717,6 +722,7 @@ def _collect_observed_opportunities(
     use_public_orderbook: bool,
     public_book_api_url: str,
     public_book_timeout_ms: int,
+    public_book_max_concurrency: int,
 ) -> tuple[list[_ObservedOpportunity], list[_RejectedOpportunity]]:
     observations: list[_ObservedOpportunity] = []
     rejections: list[_RejectedOpportunity] = []
@@ -767,6 +773,7 @@ def _collect_observed_opportunities(
             use_public_orderbook=use_public_orderbook,
             public_book_api_url=public_book_api_url,
             public_book_timeout_ms=public_book_timeout_ms,
+            public_book_max_concurrency=public_book_max_concurrency,
             orderbook_cache=orderbook_cache,
         )
 
@@ -1311,10 +1318,41 @@ def _apply_public_orderbook_snapshots(
     use_public_orderbook: bool,
     public_book_api_url: str,
     public_book_timeout_ms: int,
+    public_book_max_concurrency: int,
     orderbook_cache: dict[str, tuple[int, int, int, int] | None],
 ) -> tuple[dict[str, PricingSnapshot], int]:
     if not use_public_orderbook:
         return dict(fallback_snapshots), 0
+
+    token_ids = tuple({leg.token_id for leg in opportunity.legs})
+    missing_token_ids = [token_id for token_id in token_ids if token_id not in orderbook_cache]
+
+    if missing_token_ids:
+        worker_count = max(1, min(public_book_max_concurrency, len(missing_token_ids)))
+        if worker_count == 1:
+            for token_id in missing_token_ids:
+                orderbook_cache[token_id] = _fetch_public_top_of_book_uncached(
+                    token_id=token_id,
+                    api_url=public_book_api_url,
+                    timeout_ms=public_book_timeout_ms,
+                )
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="book-fetch") as pool:
+                future_to_token_id = {
+                    pool.submit(
+                        _fetch_public_top_of_book_uncached,
+                        token_id=token_id,
+                        api_url=public_book_api_url,
+                        timeout_ms=public_book_timeout_ms,
+                    ): token_id
+                    for token_id in missing_token_ids
+                }
+                for future in as_completed(future_to_token_id):
+                    token_id = future_to_token_id[future]
+                    try:
+                        orderbook_cache[token_id] = future.result()
+                    except Exception:
+                        orderbook_cache[token_id] = None
 
     resolved: dict[str, PricingSnapshot] = {}
     hits = 0
@@ -1322,8 +1360,6 @@ def _apply_public_orderbook_snapshots(
         fallback = fallback_snapshots.get(leg.market_id)
         top_of_book = _fetch_public_top_of_book(
             token_id=leg.token_id,
-            api_url=public_book_api_url,
-            timeout_ms=public_book_timeout_ms,
             cache=orderbook_cache,
         )
 
@@ -1354,13 +1390,17 @@ def _apply_public_orderbook_snapshots(
 def _fetch_public_top_of_book(
     *,
     token_id: str,
-    api_url: str,
-    timeout_ms: int,
     cache: dict[str, tuple[int, int, int, int] | None],
 ) -> tuple[int, int, int, int] | None:
-    cached = cache.get(token_id)
-    if token_id in cache:
-        return cached
+    return cache.get(token_id)
+
+
+def _fetch_public_top_of_book_uncached(
+    *,
+    token_id: str,
+    api_url: str,
+    timeout_ms: int,
+) -> tuple[int, int, int, int] | None:
 
     url = f"{api_url.rstrip('/')}/book?{urlencode({'token_id': token_id})}"
     request = Request(url, method="GET", headers={"Accept": "application/json", "User-Agent": "polyexecutor/1.0"})
@@ -1368,18 +1408,14 @@ def _fetch_public_top_of_book(
         with urlopen(request, timeout=max(0.1, timeout_ms / 1000.0)) as response:
             body = response.read().decode("utf-8", errors="replace")
     except Exception:
-        cache[token_id] = None
         return None
 
     try:
         payload = json.loads(body)
     except Exception:
-        cache[token_id] = None
         return None
 
-    parsed = _parse_top_of_book_payload(payload)
-    cache[token_id] = parsed
-    return parsed
+    return _parse_top_of_book_payload(payload)
 
 
 def _parse_top_of_book_payload(payload: object) -> tuple[int, int, int, int] | None:
