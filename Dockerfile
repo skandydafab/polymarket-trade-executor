@@ -7,11 +7,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 ARG INSTALL_SDK_SIGNER=true
+ARG INSTALL_WEBSOCKET_CLIENT=true
 
 # Install optional SDK dependency so live mode can use py-clob-client signing.
 RUN python -m pip install --upgrade pip && \
     if [ "$INSTALL_SDK_SIGNER" = "true" ]; then \
         python -m pip install py-clob-client; \
+    fi && \
+    if [ "$INSTALL_WEBSOCKET_CLIENT" = "true" ]; then \
+        python -m pip install websocket-client; \
     fi
 
 # Create an unprivileged runtime user.

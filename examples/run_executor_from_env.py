@@ -55,6 +55,7 @@ from executor.slug_structural_arb import (
     fetch_active_markets_for_slugs,
     parse_slug_pairs,
 )
+from executor.orderbook_ws import OrderBookStore, OrderBookWsClient
 
 
 @dataclass(slots=True)
@@ -523,6 +524,19 @@ def _process_slug_based_structural_arb(
     public_book_max_concurrency = max(1, _env_int("POLYMARKET_PUBLIC_BOOK_MAX_CONCURRENCY", 8))
     public_book_api_url = os.environ.get("POLYMARKET_API_URL", "https://clob.polymarket.com")
 
+    ws_orderbook_enabled = _env_bool("POLYMARKET_ORDERBOOK_WS_ENABLED", False)
+    ws_orderbook_url = os.environ.get(
+        "POLYMARKET_ORDERBOOK_WS_URL",
+        "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    )
+    ws_orderbook_stale_ms = max(0, _env_int("POLYMARKET_ORDERBOOK_WS_STALE_MS", 2000))
+    ws_orderbook_fallback_rest = _env_bool("POLYMARKET_ORDERBOOK_WS_FALLBACK_REST", False)
+    ws_snapshot_timeout_ms = _env_int("POLYMARKET_ORDERBOOK_WS_SNAPSHOT_TIMEOUT_MS", public_book_timeout_ms)
+    ws_snapshot_max_concurrency = max(
+        1,
+        _env_int("POLYMARKET_ORDERBOOK_WS_SNAPSHOT_MAX_CONCURRENCY", public_book_max_concurrency),
+    )
+
     execution_mode = (os.environ.get("POLYMARKET_STRUCT_ARB_EXECUTION_MODE", "emit") or "emit").strip().lower()
 
     jsonl_log_path = _resolve_output_path(
@@ -563,6 +577,9 @@ def _process_slug_based_structural_arb(
             "execution_mode": execution_mode,
             "use_public_orderbook": use_public_orderbook,
             "public_book_max_concurrency": public_book_max_concurrency,
+            "ws_orderbook_enabled": ws_orderbook_enabled,
+            "ws_orderbook_stale_ms": ws_orderbook_stale_ms,
+            "ws_orderbook_fallback_rest": ws_orderbook_fallback_rest,
             "log_jsonl": str(jsonl_log_path),
             "log_csv": str(csv_log_path),
             "log_rejections": rejection_log_enabled,
@@ -578,6 +595,15 @@ def _process_slug_based_structural_arb(
     cumulative_rejected_by_class: dict[str, int] = {}
     cumulative_rejected_by_reason: dict[str, int] = {}
     cumulative_executable_candidates = 0
+
+    orderbook_store = OrderBookStore() if ws_orderbook_enabled else None
+    orderbook_ws = (
+        OrderBookWsClient(ws_url=ws_orderbook_url, store=orderbook_store)
+        if ws_orderbook_enabled
+        else None
+    )
+    if orderbook_ws is not None:
+        orderbook_ws.start()
 
     try:
         while True:
@@ -595,6 +621,19 @@ def _process_slug_based_structural_arb(
                 continue
 
             market_counts = {slug: len(markets) for slug, markets in markets_by_slug.items()}
+            if orderbook_ws is not None:
+                token_ids = {
+                    token_id
+                    for markets in markets_by_slug.values()
+                    for market in markets
+                    for token_id in market.token_ids
+                }
+                orderbook_ws.ensure_subscribed(
+                    token_ids=token_ids,
+                    api_url=public_book_api_url,
+                    timeout_ms=ws_snapshot_timeout_ms,
+                    max_concurrency=ws_snapshot_max_concurrency,
+                )
             candidates = build_structural_arb_candidates(
                 slug_pairs,
                 markets_by_slug,
@@ -612,6 +651,9 @@ def _process_slug_based_structural_arb(
                 public_book_api_url=public_book_api_url,
                 public_book_timeout_ms=public_book_timeout_ms,
                 public_book_max_concurrency=public_book_max_concurrency,
+                orderbook_store=orderbook_store,
+                ws_orderbook_stale_ms=ws_orderbook_stale_ms,
+                ws_orderbook_fallback_rest=ws_orderbook_fallback_rest,
             )
 
             if rejection_logger is not None:
@@ -687,6 +729,8 @@ def _process_slug_based_structural_arb(
     except KeyboardInterrupt:
         print("structural_arb_monitor", "interrupted")
     finally:
+        if orderbook_ws is not None:
+            orderbook_ws.stop()
         research_logger.close_all(close_reason="shutdown", closed_ts_ns=time.time_ns())
         research_logger.close()
         if rejection_logger is not None:
@@ -723,6 +767,9 @@ def _collect_observed_opportunities(
     public_book_api_url: str,
     public_book_timeout_ms: int,
     public_book_max_concurrency: int,
+    orderbook_store: OrderBookStore | None,
+    ws_orderbook_stale_ms: int,
+    ws_orderbook_fallback_rest: bool,
 ) -> tuple[list[_ObservedOpportunity], list[_RejectedOpportunity]]:
     observations: list[_ObservedOpportunity] = []
     rejections: list[_RejectedOpportunity] = []
@@ -774,6 +821,9 @@ def _collect_observed_opportunities(
             public_book_api_url=public_book_api_url,
             public_book_timeout_ms=public_book_timeout_ms,
             public_book_max_concurrency=public_book_max_concurrency,
+            orderbook_store=orderbook_store,
+            ws_orderbook_stale_ms=ws_orderbook_stale_ms,
+            ws_orderbook_fallback_rest=ws_orderbook_fallback_rest,
             orderbook_cache=orderbook_cache,
         )
 
@@ -1319,6 +1369,9 @@ def _apply_public_orderbook_snapshots(
     public_book_api_url: str,
     public_book_timeout_ms: int,
     public_book_max_concurrency: int,
+    orderbook_store: OrderBookStore | None,
+    ws_orderbook_stale_ms: int,
+    ws_orderbook_fallback_rest: bool,
     orderbook_cache: dict[str, tuple[int, int, int, int] | None],
 ) -> tuple[dict[str, PricingSnapshot], int]:
     if not use_public_orderbook:
@@ -1358,10 +1411,25 @@ def _apply_public_orderbook_snapshots(
     hits = 0
     for leg in opportunity.legs:
         fallback = fallback_snapshots.get(leg.market_id)
-        top_of_book = _fetch_public_top_of_book(
-            token_id=leg.token_id,
-            cache=orderbook_cache,
-        )
+        top_of_book = None
+        if orderbook_store is not None:
+            ws_top = orderbook_store.get_top_of_book(
+                token_id=leg.token_id,
+                stale_ms=ws_orderbook_stale_ms,
+            )
+            if ws_top is not None:
+                top_of_book = (
+                    ws_top.best_bid_ticks,
+                    ws_top.best_bid_size,
+                    ws_top.best_ask_ticks,
+                    ws_top.best_ask_size,
+                )
+
+        if top_of_book is None and ws_orderbook_fallback_rest:
+            top_of_book = _fetch_public_top_of_book(
+                token_id=leg.token_id,
+                cache=orderbook_cache,
+            )
 
         if top_of_book is None:
             if fallback is not None:

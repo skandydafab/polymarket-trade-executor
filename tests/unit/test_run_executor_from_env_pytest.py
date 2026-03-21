@@ -245,12 +245,10 @@ def test_collect_rejects_locked_book_as_invalid(monkeypatch: pytest.MonkeyPatch)
 
     def _locked_book(
         *,
-        api_url: str,
         token_id: str,
-        timeout_ms: int,
         cache: dict[str, tuple[int, int, int, int] | None],
     ) -> tuple[int, int, int, int]:
-        _ = (api_url, token_id, timeout_ms, cache)
+        _ = (token_id, cache)
         return (60, 100, 60, 100)
 
     monkeypatch.setattr("examples.run_executor_from_env._fetch_public_top_of_book", _locked_book)
@@ -263,6 +261,10 @@ def test_collect_rejects_locked_book_as_invalid(monkeypatch: pytest.MonkeyPatch)
         use_public_orderbook=True,
         public_book_api_url="https://example.invalid",
         public_book_timeout_ms=500,
+        public_book_max_concurrency=1,
+        orderbook_store=None,
+        ws_orderbook_stale_ms=2000,
+        ws_orderbook_fallback_rest=True,
     )
 
     assert observations == []
@@ -311,12 +313,10 @@ def test_collect_rejects_price_protection_before_planner(monkeypatch: pytest.Mon
 
     def _wide_buy_ask(
         *,
-        api_url: str,
         token_id: str,
-        timeout_ms: int,
         cache: dict[str, tuple[int, int, int, int] | None],
     ) -> tuple[int, int, int, int]:
-        _ = (api_url, token_id, timeout_ms, cache)
+        _ = (token_id, cache)
         return (79, 100, 80, 100)
 
     monkeypatch.setattr("examples.run_executor_from_env._fetch_public_top_of_book", _wide_buy_ask)
@@ -329,6 +329,10 @@ def test_collect_rejects_price_protection_before_planner(monkeypatch: pytest.Mon
         use_public_orderbook=True,
         public_book_api_url="https://example.invalid",
         public_book_timeout_ms=500,
+        public_book_max_concurrency=1,
+        orderbook_store=None,
+        ws_orderbook_stale_ms=2000,
+        ws_orderbook_fallback_rest=True,
     )
 
     assert observations == []
