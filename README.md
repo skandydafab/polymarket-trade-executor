@@ -60,6 +60,7 @@ High-level execution flow:
 - `executor/polymarket_adapter.py`
 - `executor/polymarket_clob_client.py`
 - `executor/polymarket_sdk_signer.py`
+- `executor/slug_structural_arb.py`
 - `executor/venue.py`
 
 ### Reliability and recovery
@@ -115,6 +116,14 @@ Review that:
 - `.env` is ignored in VCS,
 - no secrets are logged.
 
+### F. Slug pairing heuristic quality
+Slug auto-pairing is heuristic-based at slug level, and strict market-level matching is required for structural arb execution.
+
+Review that:
+- chosen slug pairs match intended semantic relationships,
+- strict mode finds both boundary strikes for each range market,
+- fallback behavior is acceptable if you intentionally use non-strict match modes.
+
 ---
 
 ## 6) Running the project
@@ -136,27 +145,81 @@ Fill `.env` with your real values before live mode.
 This entrypoint:
 - loads `.env`,
 - constructs planner/risk/adapter/journal/recovery/service,
-- parses optional market subscription scope from env,
+- resolves market subscriptions from slug inputs via Gamma API,
+- auto-pairs slugs using naming/date rules,
+- builds structural-arb candidates from paired markets,
 - starts service and performs a safe startup check,
 - optionally runs recovery on startup.
 
 ### C. Market subscription scope
 
-Put your target markets/tokens in `.env`:
+Preferred configuration is slug-only:
 
-- `POLYMARKET_SUBSCRIBE_MARKET_IDS`
-- `POLYMARKET_SUBSCRIBE_TOKEN_IDS`
+- `POLYMARKET_SUBSCRIBE_SLUGS`
+
+Optional controls:
+
+- `POLYMARKET_SUBSCRIBE_SLUG_PAIRS` (explicit pair overrides)
+- `POLYMARKET_AUTO_PAIR_SLUGS` (default `true`)
+- `POLYMARKET_STRUCT_ARB_MATCH_MODE` (`strict`, `text`, or `cross`; default `strict`)
+- `POLYMARKET_STRUCT_ARB_MIN_SIMILARITY`
+- `POLYMARKET_STRUCT_ARB_MAX_CANDIDATES`
+- `POLYMARKET_STRUCT_ARB_MIN_EDGE_BPS`
+- `POLYMARKET_STRUCT_ARB_MONITOR_INTERVAL_MS` (default `250`)
+- `POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS` (`<=0` means run until interrupted)
+- `POLYMARKET_STRUCT_ARB_USE_PUBLIC_ORDERBOOK` (public top-of-book for fillable sizing)
+- `POLYMARKET_PUBLIC_BOOK_TIMEOUT_MS`
+- `POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH`
+- `POLYMARKET_STRUCT_ARB_LOG_CSV_PATH`
+- `POLYMARKET_STRUCT_ARB_LOG_REJECTIONS`
+- `POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH`
+- `POLYMARKET_STRUCT_ARB_EXECUTION_MODE` (`emit` or `execute`)
 
 Format: comma-separated values.
 
 Example:
 
 ```dotenv
-POLYMARKET_SUBSCRIBE_MARKET_IDS=0xmarket_condition_id_example_a,0xmarket_condition_id_example_b
-POLYMARKET_SUBSCRIBE_TOKEN_IDS=1234567890123456789012345678901234567890,9876543210987654321098765432109876543210
+POLYMARKET_SUBSCRIBE_SLUGS=bitcoin-price-on-march-22,bitcoin-price-between-march-22
+POLYMARKET_AUTO_PAIR_SLUGS=true
+POLYMARKET_STRUCT_ARB_MATCH_MODE=strict
+POLYMARKET_STRUCT_ARB_MIN_EDGE_BPS=1
+POLYMARKET_STRUCT_ARB_MONITOR_INTERVAL_MS=250
+POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS=300
+POLYMARKET_STRUCT_ARB_USE_PUBLIC_ORDERBOOK=true
+POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH=./data/research/structural_arb_events.jsonl
+POLYMARKET_STRUCT_ARB_LOG_CSV_PATH=./data/research/structural_arb_windows.csv
+POLYMARKET_STRUCT_ARB_LOG_REJECTIONS=true
+POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH=./data/research/structural_arb_rejections.jsonl
+POLYMARKET_STRUCT_ARB_MIN_SIMILARITY=0.40
+POLYMARKET_STRUCT_ARB_EXECUTION_MODE=emit
 ```
 
-Note: the executor itself does not directly subscribe to data feeds. These env values are meant to define scope for your upstream market-data collector/detector, and `examples/run_executor_from_env.py` now parses and surfaces them on startup.
+Strict mode requirement:
+- The range market must contain two strikes (for example, `between 88000 and 92000`).
+- The paired non-between market set must contain both matching boundary strikes (`above 88000` and `above 92000`, or equivalently `below 92000` and `below 88000`).
+- Only then does the runner emit a structural candidate, and in `execute` mode it creates a 3-leg package.
+- Execution now evaluates both YES and NO outcome quotes/tokens for each market and selects the strongest valid strict equation variant.
+
+Research logging output (offline and live):
+- Opportunity identity: asset/slug-pair, market ids/questions, leg side, YES/NO outcome.
+- Observation timing: per-sample UTC timestamp and per-window first/last seen times.
+- Max fillable outcome: planner-derived max fillable units and max fillable net profit for that sample.
+- Opportunity lifetime: window duration until price change/missing condition closes the window.
+- Extra diagnostics: edge decomposition (gross/fees/net), top-of-book liquidity details, lifecycle markers (`opened`, `update`, `closed`, close reason), and split edge fields (`theoretical_edge_bps` vs `executable_edge_bps`).
+- Rejection diagnostics: dedicated JSONL stream with explicit `reason_code`, `reason`, `diagnostic_class` (`INVALID_BOOK`, `PRICE_PROTECTION`, `BUILD_FAILURE`) plus candidate context (market ids, strikes, relation id), build context, and per-leg checks.
+
+Runtime poll diagnostics:
+- `structural_arb_poll` now emits `executable_candidates`, `rejected_by_class`, `rejected_by_reason`, and cumulative counters to separate market-condition failures from conversion/system issues.
+
+Important: these JSONL/CSV logs are written in both paper mode and live mode, so attaching credentials does not disable research traces.
+
+Manual scope remains available for upstream integrations:
+
+- `POLYMARKET_SUBSCRIBE_MARKET_IDS`
+- `POLYMARKET_SUBSCRIBE_TOKEN_IDS`
+
+Note: the executor itself still consumes opportunities/snapshots; slug resolution and structural-arb candidate construction are orchestration helpers in `examples/run_executor_from_env.py`.
 
 ### D. Modes
 
@@ -176,6 +239,58 @@ Note: the executor itself does not directly subscribe to data feeds. These env v
 ```powershell
 .\.venv\Scripts\python.exe -m pip install py-clob-client
 ```
+
+### F. Docker (local and DigitalOcean droplet)
+
+The repository now includes:
+- `Dockerfile`
+- `.dockerignore`
+- `docker-compose.yml`
+
+Quick start (local or remote Linux host):
+
+```bash
+cp .env.example .env
+```
+
+Set your desired values in `.env`.
+For long-running deployment, set:
+
+```dotenv
+POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS=0
+```
+
+Build and run:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+View logs:
+
+```bash
+docker compose logs -f polyexecutor
+```
+
+Stop:
+
+```bash
+docker compose down
+```
+
+Persistence:
+- `./data` is mounted to `/app/data` in the container.
+- Research logs and journal output survive container restarts.
+- Container restart policy is `unless-stopped`.
+
+DigitalOcean droplet checklist:
+1. Create an Ubuntu droplet and SSH in.
+2. Install Docker Engine and Docker Compose plugin.
+3. Clone this repository to the droplet.
+4. Create `.env` from `.env.example` and set credentials when ready.
+5. Run `docker compose up -d`.
+6. Monitor with `docker compose logs -f polyexecutor`.
 
 ---
 

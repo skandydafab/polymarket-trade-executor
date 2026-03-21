@@ -1,0 +1,17 @@
+services:
+  polyexecutor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_SDK_SIGNER: "true"
+    image: polyexecutor:latest
+    container_name: polyexecutor
+    env_file:
+      - .env
+    environment:
+      # Run continuously in containerized deployment.
+      POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS: "0"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
