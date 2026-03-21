@@ -31,6 +31,17 @@ def test_auto_pair_slugs_matches_between_and_non_between_same_theme_date() -> No
     assert ("eth-price-on-march-22", "eth-price-between-march-22") in pairs
 
 
+def test_auto_pair_slugs_matches_price_and_above_same_theme_date() -> None:
+    slugs = (
+        "bitcoin-above-on-march-22",
+        "bitcoin-price-on-march-22",
+    )
+
+    pairs = auto_pair_slugs(slugs)
+
+    assert ("bitcoin-above-on-march-22", "bitcoin-price-on-march-22") in pairs
+
+
 def test_build_slug_pairs_merges_explicit_and_auto() -> None:
     plan = SlugSubscriptionPlan(
         slugs=(

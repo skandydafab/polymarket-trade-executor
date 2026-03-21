@@ -49,6 +49,12 @@ _SLUG_STOPWORDS = {
     "or",
     "with",
     "price",
+    "above",
+    "below",
+    "over",
+    "under",
+    "inside",
+    "outside",
     "between",
     "range",
     "will",
@@ -165,7 +171,11 @@ def fetch_active_markets_for_slugs(
         if not slug or slug in seen:
             continue
         seen.add(slug)
-        by_slug[slug] = fetch_markets_for_slug(slug, config)
+        try:
+            by_slug[slug] = fetch_markets_for_slug(slug, config)
+        except Exception:
+            # Skip stale or invalid slugs so one failure does not abort the full batch.
+            continue
 
     return by_slug
 
