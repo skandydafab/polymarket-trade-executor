@@ -15,10 +15,10 @@ services:
       POLYMARKET_CLIENT_ORDER_ID_PREFIX: "pmx1"
       EXECUTOR_CLIENT_ORDER_ID_PREFIX: "exec1"
       POLYMARKET_SUBSCRIBE_SLUGS: "bitcoin-above-on-march-31,bitcoin-price-on-march-31,bitcoin-above-on-april-1,bitcoin-price-on-april-1,ethereum-above-on-march-31,ethereum-price-on-march-31,ethereum-above-on-april-1,ethereum-price-on-april-1"
-      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/instance1/research/structural_arb_events.jsonl"
-      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/instance1/research/structural_arb_windows.csv"
-      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/instance1/research/structural_arb_rejections.jsonl"
-      EXECUTOR_JOURNAL_DIR: "./data/instance1/journal"
+      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/research/structural_arb_events.jsonl"
+      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/research/structural_arb_windows.csv"
+      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/research/structural_arb_rejections.jsonl"
+      EXECUTOR_JOURNAL_DIR: "./data/journal"
     volumes:
       - ./data/instance1:/app/data
     restart: unless-stopped
@@ -39,10 +39,10 @@ services:
       POLYMARKET_CLIENT_ORDER_ID_PREFIX: "pmx2"
       EXECUTOR_CLIENT_ORDER_ID_PREFIX: "exec2"
       POLYMARKET_SUBSCRIBE_SLUGS: "solana-above-on-march-31,solana-price-on-march-31,solana-above-on-april-1,solana-price-on-april-1"
-      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/instance2/research/structural_arb_events.jsonl"
-      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/instance2/research/structural_arb_windows.csv"
-      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/instance2/research/structural_arb_rejections.jsonl"
-      EXECUTOR_JOURNAL_DIR: "./data/instance2/journal"
+      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/research/structural_arb_events.jsonl"
+      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/research/structural_arb_windows.csv"
+      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/research/structural_arb_rejections.jsonl"
+      EXECUTOR_JOURNAL_DIR: "./data/journal"
     volumes:
       - ./data/instance2:/app/data
     restart: unless-stopped
