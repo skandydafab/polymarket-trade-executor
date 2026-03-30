@@ -338,7 +338,7 @@ def main() -> None:
     slug_plan = _read_slug_subscription_plan_from_env()
 
     logger = PrintLogger()
-    planner = ExecutionPlanner(PlannerConfig())
+    planner = ExecutionPlanner(PlannerConfig(default_max_slippage_bps=10_000))
     risk_manager = ExecutionRiskManager(RiskManagerConfig())
 
     adapter_config = _build_adapter_config()

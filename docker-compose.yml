@@ -1,17 +1,46 @@
 services:
-  polyexecutor:
+  polyexecutor1:
     build:
       context: .
       dockerfile: Dockerfile
       args:
         INSTALL_SDK_SIGNER: "true"
     image: polyexecutor:latest
-    container_name: polyexecutor
+    container_name: polyexecutor1
     env_file:
       - .env
     environment:
-      # Run continuously in containerized deployment.
       POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS: "0"
+      EXECUTOR_SERVICE_NAME: "executor-live-1"
+      POLYMARKET_CLIENT_ORDER_ID_PREFIX: "pmx1"
+      EXECUTOR_CLIENT_ORDER_ID_PREFIX: "exec1"
+      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/instance1/research/structural_arb_events.jsonl"
+      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/instance1/research/structural_arb_windows.csv"
+      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/instance1/research/structural_arb_rejections.jsonl"
+      EXECUTOR_JOURNAL_DIR: "./data/instance1/journal"
     volumes:
-      - ./data:/app/data
+      - ./data/instance1:/app/data
+    restart: unless-stopped
+
+  polyexecutor2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_SDK_SIGNER: "true"
+    image: polyexecutor:latest
+    container_name: polyexecutor2
+    env_file:
+      - .env
+    environment:
+      POLYMARKET_STRUCT_ARB_MONITOR_DURATION_SECONDS: "0"
+      EXECUTOR_SERVICE_NAME: "executor-live-2"
+      POLYMARKET_CLIENT_ORDER_ID_PREFIX: "pmx2"
+      EXECUTOR_CLIENT_ORDER_ID_PREFIX: "exec2"
+      POLYMARKET_STRUCT_ARB_LOG_JSONL_PATH: "./data/instance2/research/structural_arb_events.jsonl"
+      POLYMARKET_STRUCT_ARB_LOG_CSV_PATH: "./data/instance2/research/structural_arb_windows.csv"
+      POLYMARKET_STRUCT_ARB_LOG_REJECTIONS_JSONL_PATH: "./data/instance2/research/structural_arb_rejections.jsonl"
+      EXECUTOR_JOURNAL_DIR: "./data/instance2/journal"
+    volumes:
+      - ./data/instance2:/app/data
     restart: unless-stopped
